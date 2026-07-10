@@ -1,96 +1,79 @@
 import cv2
 import mediapipe as mp
+import joblib
+import numpy as np
+from collections import deque  # 🌟 Titremeyi engellemek için kuyruk yapısı
+
+# 1. Modeli ve Scaler'ı Yükle
+model = joblib.load("gesture_mlp_model.pkl")
+scaler = joblib.load("scaler.pkl")
+imputer = joblib.load("imputer.pkl") # YÜKLE
+
+# 2. MediaPipe Tasks API Setup (Senin sistemin için en doğrusu)
+from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-import urllib.request
-import os
 
-# 1. Model Dosyasını İndir (Sadece ilk çalışmada indirir)
-model_path = 'hand_landmarker.task'
-if not os.path.exists(model_path):
-    print("Model dosyası indiriliyor...")
-    url = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-    urllib.request.urlretrieve(url, model_path)
-    print("İndirme tamamlandı!")
-
-# 2. Hand Landmarker (El İzleyici) Ayarlarını Yapılandır
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-
-options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=model_path),
-    running_mode=VisionRunningMode.VIDEO,
+base_options = python.BaseOptions(model_asset_path="hand_landmarker.task")
+options = vision.HandLandmarkerOptions(
+    base_options=base_options,
     num_hands=2,
-    min_hand_detection_confidence=0.5,
-    min_hand_presence_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_hand_detection_confidence=0.3  # Burayı değiştirebilirsin
 )
+detector = vision.HandLandmarker.create_from_options(options)
 
-# 3. Bağlantı Noktaları (Eski mp_hands_connections yerine manuel liste)
-# MediaPipe'in standart 21 noktalı el modeli bağlantı şeması
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),  # Baş parmak
-    (0, 5), (5, 6), (6, 7), (7, 8),  # İşaret parmağı
-    (5, 9), (9, 10), (10, 11), (11, 12),  # Orta parmak
-    (9, 13), (13, 14), (14, 15), (15, 16),  # Yüzük parmağı
-    (13, 17), (0, 17), (17, 18), (18, 19), (19, 20)  # Serçe parmak ve taban
-]
+# 3. 🌟 TİTREMEYİ ENGELLEYEN TAMPON
+prediction_history = deque(maxlen=10)  # Son 10 kareyi hafızada tut
 
-# 4. Kamerayı Başlat
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-print("Kamera açılıyor... Çıkmak için 'q' tuşuna basın.")
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret: break
 
-# 5. Modeli Başlat ve Döngüye Gir
-with HandLandmarker.create_from_options(options) as landmarker:
-    frame_timestamp_ms = 0
+    frame = cv2.flip(frame, 1)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    while True:
-        success, frame = cap.read()
-        if not success:
-            print("Kamera okunamadı.")
-            continue
+    # MediaPipe ile tespit
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    detection_result = detector.detect(mp_image)
 
-        frame_timestamp_ms += int(1000 / cap.get(cv2.CAP_PROP_FPS) if cap.get(cv2.CAP_PROP_FPS) > 0 else 33)
+    label_to_display = "Tespit ediliyor..."
 
-        # OpenCV BGR'yi MediaPipe'in beklediği RGB formatına çevir
-        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    if detection_result.hand_landmarks:
+        # Veriyi çıkar (extract_features.py ile aynı mantık)
+        row_data = [0.0] * 84
+        for idx, hand_landmarks in enumerate(detection_result.hand_landmarks):
+            hand_label = detection_result.handedness[idx][0].category_name
+            wrist_x = hand_landmarks[0].x
+            wrist_y = hand_landmarks[0].y
 
-        # MediaPipe Image objesi oluştur
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+            temp_coords = []
+            for lm in hand_landmarks:
+                temp_coords.extend([lm.x - wrist_x, lm.y - wrist_y])
 
-        # Modeli çalıştır
-        hand_landmarker_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+            if hand_label == "Right":
+                row_data[0:42] = temp_coords
+            else:
+                row_data[42:84] = temp_coords
 
-        # 6. Sonuçları Ekrana Çiz (Tamamen manuel, solutions kullanılmadan)
-        if hand_landmarker_result.hand_landmarks:
-            for hand_landmarks in hand_landmarker_result.hand_landmarks:
-                h, w, _ = frame.shape
+        # Tahmin Et
+        input_data = np.array([row_data])
+        scaled_data = scaler.transform(input_data)
+        final_data = imputer.transform(scaled_data)  # DOLDUR
+        prediction = model.predict(scaled_data)[0]
 
-                # Önce çizgileri çiz
-                for connection in HAND_CONNECTIONS:
-                    start_idx = connection[0]
-                    end_idx = connection[1]
+        # 🌟 TAMPONA EKLE VE OYLA
+        prediction_history.append(prediction)
+        most_common = max(set(prediction_history), key=prediction_history.count)
+        label_to_display = f"Harf: {most_common}"
+    else:
+        prediction_history.clear()  # El yoksa geçmişi sıfırla
 
-                    start_point = (int(hand_landmarks[start_idx].x * w), int(hand_landmarks[start_idx].y * h))
-                    end_point = (int(hand_landmarks[end_idx].x * w), int(hand_landmarks[end_idx].y * h))
+    # Ekrana yaz
+    cv2.putText(frame, label_to_display, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+    cv2.imshow('TID Recognition', frame)
 
-                    cv2.line(frame, start_point, end_point, (255, 0, 0), 2)  # Mavi çizgiler
-
-                # Sonra noktaları (eklem yerlerini) çiz
-                for landmark in hand_landmarks:
-                    x = int(landmark.x * w)
-                    y = int(landmark.y * h)
-                    cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)  # Yeşil noktalar
-
-        # Görüntüyü göster
-        cv2.imshow("MediaPipe Tasks API - El Takibi", frame)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
 cv2.destroyAllWindows()

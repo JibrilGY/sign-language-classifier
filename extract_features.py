@@ -1,99 +1,103 @@
-import cv2
 import mediapipe as mp
+from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import os
 import csv
 import glob
 import random
+import numpy as np  # 🌟 Açı hesabı için numpy lazım
 
-# 1. Configuration & Paths
-DATASET_PATH = "dataset/train"  # Update this if your path is just "dataset"
-CSV_FILENAME = "tid_dataset.csv"
+# 1. Configuration
+DATASET_PATH = "dataset"
+CSV_FILENAME = "tid_dataset_2hands.csv"
 MAX_IMAGES_PER_CLASS = 500
-MODEL_PATH = 'hand_landmarker.task'
+MODEL_PATH = "hand_landmarker.task"
 
-# 2. MediaPipe Setup
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
 
-options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=MODEL_PATH),
-    running_mode=VisionRunningMode.IMAGE,
-    num_hands=1,
-    min_hand_detection_confidence=0.5
-)
+# 🌟 AÇI HESAPLAMA FONKSİYONU
+def calculate_angle(a, b, c):
+    a = np.array(a)  # İlk nokta
+    b = np.array(b)  # Orta nokta (eklem)
+    c = np.array(c)  # Son nokta
 
-# 3. Initialize CSV with Headers
+    ba = a - b
+    bc = c - b
+
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+    return np.degrees(angle)
+
+
+# MediaPipe Setup
+base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+options = vision.HandLandmarkerOptions(base_options=base_options, num_hands=2, min_hand_detection_confidence=0.5)
+detector = vision.HandLandmarker.create_from_options(options)
+
+# 3. Initialize CSV with Headers (84 Koordinat + 24 Açı = 108 Sütun)
 with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
     headers = ['label']
-    for i in range(21):
-        headers.extend([f'x{i}', f'y{i}'])
+    for i in range(21): headers.extend([f'rx{i}', f'ry{i}'])  # Right
+    for i in range(21): headers.extend([f'lx{i}', f'ly{i}'])  # Left
+    # Yeni Açı sütunları
+    for i in range(12): headers.append(f'angle_{i}')
     writer.writerow(headers)
 
-print(f"Starting feature extraction... Max {MAX_IMAGES_PER_CLASS} images per class.")
+print("Feature extraction with Geometry (Angles) started...")
 total_processed = 0
-total_errors = 0
 
-# 4. Processing Loop
-with HandLandmarker.create_from_options(options) as landmarker:
-    classes = sorted(os.listdir(DATASET_PATH))
+classes = sorted(os.listdir(DATASET_PATH))
+for class_name in classes:
+    class_path = os.path.join(DATASET_PATH, class_name)
+    if not os.path.isdir(class_path): continue
 
-    for class_name in classes:
-        class_path = os.path.join(DATASET_PATH, class_name)
-        if not os.path.isdir(class_path):
+    label = class_name
+    all_images = glob.glob(os.path.join(class_path, "*.jpg")) + glob.glob(os.path.join(class_path, "*.png"))
+    selected_images = random.sample(all_images, min(len(all_images), MAX_IMAGES_PER_CLASS))
+
+    print(f"Processing '{label}'... ", end="", flush=True)
+    class_processed = 0
+
+    for image_path in selected_images:
+        try:
+            mp_image = mp.Image.create_from_file(image_path)
+            results = detector.detect(mp_image)
+        except Exception:
             continue
 
-        label = class_name
-        all_images = glob.glob(os.path.join(class_path, "*.jpg")) + glob.glob(os.path.join(class_path, "*.png"))
+        row_data = [0.0] * 108  # 84 + 24 yeni açı
 
-        if len(all_images) > MAX_IMAGES_PER_CLASS:
-            selected_images = random.sample(all_images, MAX_IMAGES_PER_CLASS)
-        else:
-            selected_images = all_images
+        if results.hand_landmarks:
+            angles = []
+            for idx, hand_landmarks in enumerate(results.hand_landmarks):
+                hand_label = results.handedness[idx][0].category_name
+                wrist_x, wrist_y = hand_landmarks[0].x, hand_landmarks[0].y
 
-        print(f"Processing class '{label}'... ({len(selected_images)} images)")
+                coords = []
+                for lm in hand_landmarks:
+                    coords.extend([lm.x - wrist_x, lm.y - wrist_y])
 
-        class_processed = 0
-        class_errors = 0
+                if hand_label == "Right":
+                    row_data[0:42] = coords
+                else:
+                    row_data[42:84] = coords
 
-        for image_path in selected_images:
-            frame = cv2.imread(image_path)
-            if frame is None:
-                continue
+                # Parmak açılarını hesapla (İşaret, Orta, Yüzük, Serçe için)
+                # Örnek: MCP-PIP-DIP eklemleri arası
+                for i in range(4):  # 4 parmak
+                    base = i * 4 + 1
+                    a = [hand_landmarks[base].x, hand_landmarks[base].y]
+                    b = [hand_landmarks[base + 1].x, hand_landmarks[base + 1].y]
+                    c = [hand_landmarks[base + 2].x, hand_landmarks[base + 2].y]
+                    angles.append(calculate_angle(a, b, c))
 
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-            result = landmarker.detect(mp_image)
+            row_data[84:] = angles  # Açıları son kısma ekle
 
-            if result.hand_landmarks:
-                for hand_landmarks in result.hand_landmarks:
-                    wrist_x = hand_landmarks[0].x
-                    wrist_y = hand_landmarks[0].y
+            with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow([label] + row_data)
+            class_processed += 1
+            total_processed += 1
 
-                    normalized_coords = []
-                    for landmark in hand_landmarks:
-                        normalized_coords.extend([
-                            landmark.x - wrist_x,
-                            landmark.y - wrist_y
-                        ])
+    print(f"Success: {class_processed}")
 
-                    with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
-                        writer = csv.writer(f)
-                        row = [label] + normalized_coords
-                        writer.writerow(row)
-
-                    class_processed += 1
-                    total_processed += 1
-            else:
-                class_errors += 1
-                total_errors += 1
-
-        print(f"  -> Success: {class_processed} | Hand not detected: {class_errors}")
-
-print("-" * 30)
-print("Feature Extraction Completed!")
-print(f"Total rows written to CSV: {total_processed}")
-print(f"Total skipped images: {total_errors}")
+print("Extraction complete. Now training will be much more accurate!")
