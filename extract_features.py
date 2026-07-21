@@ -45,12 +45,10 @@ with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
 
 print("Feature extraction with Geometry (Angles) started...")
 total_processed = 0
-
 classes = sorted(os.listdir(DATASET_PATH))
 for class_name in classes:
     class_path = os.path.join(DATASET_PATH, class_name)
     if not os.path.isdir(class_path): continue
-
     label = class_name
     all_images = glob.glob(os.path.join(class_path, "*.jpg")) + glob.glob(os.path.join(class_path, "*.png"))
     selected_images = random.sample(all_images, min(len(all_images), MAX_IMAGES_PER_CLASS))
@@ -65,39 +63,42 @@ for class_name in classes:
         except Exception:
             continue
 
-        row_data = [0.0] * 108  # 84 + 24 yeni açı
+        if not results.hand_landmarks:
+            continue
 
-        if results.hand_landmarks:
-            angles = []
-            for idx, hand_landmarks in enumerate(results.hand_landmarks):
-                hand_label = results.handedness[idx][0].category_name
-                wrist_x, wrist_y = hand_landmarks[0].x, hand_landmarks[0].y
+        # 96 elemanlı sabit boyutlu satır (84 koordinat + 12 açı yeri)
+        row_data = [0.0] * 96
+        angles = []
 
-                coords = []
-                for lm in hand_landmarks:
-                    coords.extend([lm.x - wrist_x, lm.y - wrist_y])
+        for idx, hand_landmarks in enumerate(results.hand_landmarks):
+            if idx >= 2:  # Güvenlik için en fazla 2 el
+                break
+            hand_label = results.handedness[idx][0].category_name
+            wrist_x, wrist_y = hand_landmarks[0].x, hand_landmarks[0].y
 
-                if hand_label == "Right":
-                    row_data[0:42] = coords
-                else:
-                    row_data[42:84] = coords
+            coords = []
+            for lm in hand_landmarks:
+                coords.extend([lm.x - wrist_x, lm.y - wrist_y])
 
-                # Parmak açılarını hesapla (İşaret, Orta, Yüzük, Serçe için)
-                # Örnek: MCP-PIP-DIP eklemleri arası
-                for i in range(4):  # 4 parmak
-                    base = i * 4 + 1
-                    a = [hand_landmarks[base].x, hand_landmarks[base].y]
-                    b = [hand_landmarks[base + 1].x, hand_landmarks[base + 1].y]
-                    c = [hand_landmarks[base + 2].x, hand_landmarks[base + 2].y]
-                    angles.append(calculate_angle(a, b, c))
+            if hand_label == "Right":
+                row_data[0:42] = coords
+            else:
+                row_data[42:84] = coords
 
-            row_data[84:] = angles  # Açıları son kısma ekle
+            # Parmak açılarını hesapla (İşaret, Orta, Yüzük, Serçe)
+            for i in range(4):
+                base = i * 4 + 1
+                a = [hand_landmarks[base].x, hand_landmarks[base].y]
+                b = [hand_landmarks[base + 1].x, hand_landmarks[base + 1].y]
+                c = [hand_landmarks[base + 2].x, hand_landmarks[base + 2].y]
+                angles.append(calculate_angle(a, b, c))
 
-            with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
-                csv.writer(f).writerow([label] + row_data)
-            class_processed += 1
-            total_processed += 1
+        # Hesaplanan açıları 84. indexten itibaren yerleştir (fazlası sıfır kalır)
+        if angles:
+            row_data[84:84 + len(angles)] = angles
 
+        with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerow([label] + row_data)
+        class_processed += 1
+        total_processed += 1
     print(f"Success: {class_processed}")
-
-print("Extraction complete. Now training will be much more accurate!")

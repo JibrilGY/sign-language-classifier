@@ -1,4 +1,11 @@
+#Python / Environment
 .venv/
 __pycache__/
 *.task
+
+#Datasets
 dataset/
+*.csv
+
+#Model & Preprocessing Artifacts
+*.pkl

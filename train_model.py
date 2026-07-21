@@ -1,53 +1,109 @@
-import pandas as pd
-from xgboost import XGBClassifier # 🌟 XGBoost kullanıyoruz
+#Veri Yükleme, Bölme ve Ölçekleme
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import pandas as pd
+
+CSV_FILENAME = "tid_dataset_2hands.csv"
+df= pd.read_csv(CSV_FILENAME)
+
+X = df.drop(columns=['label']).values
+y_raw = df['label'].values
+
+#XGBoost İçin
+label_encoder = LabelEncoder()
+y = label_encoder.fit_transform(y_raw)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+#GridSearchCV
+from sklearn.model_selection import GridSearchCV
+#Aday Algoritmalar
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from xgboost import XGBClassifier
+
+models_and_grids = {
+    "Logistic Regression": {
+        "model": LogisticRegression(max_iter=5000, random_state=30),
+        "params": {"C": [0.1,1,10], "solver": ["lbfgs","saga"]},
+    },
+    "Decision Tree": {
+        "model": DecisionTreeClassifier(random_state=30),
+        "params": {"max_depth": [None,50,100], "min_samples_split":[2,5]}
+    },
+    "Random Forest": {
+        "model": RandomForestClassifier(random_state=30),
+        "params": {"n_estimators": [50,100], "max_depth": [None,10]}
+    },
+    "SVM": {
+        "model": SVC(random_state=30),
+        "params": {"C": [0.1,1,10], "kernel": ["linear","rbf"]}
+    },
+    "KNN": {
+        "model": KNeighborsClassifier(),
+        "params": {"n_neighbors": [3,5,7], "weights": ["uniform","distance"]}
+    },
+    "XGBoost": {
+        "model": XGBClassifier(random_state=30, eval_metric="logloss",),
+        "params": {"n_estimators": [50,100], "learning_rate": [0.01,0.1]}
+    }
+}
+
+best_overall_score = 0
+best_overall_model = None
+best_overall_name = ""
+best_overall_params = {}
+
+for name, info in models_and_grids.items():
+    print(f"\n[Yarışma] {name} test ediliyor.")
+
+    grid_search = GridSearchCV(
+        estimator=info['model'],
+        param_grid=info['params'],
+        cv=5,
+        scoring="accuracy",
+        n_jobs=-1
+    )
+
+    grid_search.fit(X_train_scaled, y_train)
+
+    print(f"-> {name} En İyi Skoru: {grid_search.best_score_:.4f}")
+    print(f"-> En İyi Parametreler: {grid_search.best_params_}")
+
+    #Daha iyisine göre güncelleme
+    if grid_search.best_score_ > best_overall_score:
+        best_overall_score = grid_search.best_score_
+        best_overall_model = grid_search.best_estimator_
+        best_overall_name = name
+        best_overall_params = grid_search.best_params_
+
+print("\n" + "=" * 40)
+print(f"🏆 LİGİN ŞAMPİYONU: {best_overall_name}")
+print(f"Doğruluk Skoru: {best_overall_score:.4f}")
+print(f"Kazanan Parametreler: {best_overall_params}")
+print("=" * 40)
+
+
 import joblib
-from sklearn.metrics import accuracy_score
+# Şampiyon modeli, scaler'ı ve label encoder'ı diske kaydet
+joblib.dump(best_overall_model, "best_hand_model.pkl")
+joblib.dump(scaler, "scaler.pkl")
+joblib.dump(label_encoder, "label_encoder.pkl")
 
-# 1. Veriyi Yükle
-df = pd.read_csv("tid_dataset_2hands.csv")
-X = df.drop('label', axis=1)
-y = df['label']
+print("\nModel, Scaler ve Label Encoder başarıyla kaydedildi!")
 
-# 2. Etiketleri Sayıya Çevir (XGBoost bunu ister)
-le = LabelEncoder()
-y_encoded = le.fit_transform(y)
+# Test seti üzerinde son performans kontrolü
+from sklearn.metrics import accuracy_score, classification_report
 
-# 3. Boş Verileri Doldur
-imputer = SimpleImputer(strategy='constant', fill_value=0.0)
-X_imputed = imputer.fit_transform(X)
+y_pred = best_overall_model.predict(X_test_scaled)
+test_accuracy = accuracy_score(y_test, y_pred)
 
-X_train, X_test, y_train, y_test = train_test_split(X_imputed, y_encoded, test_size=0.2, random_state=42)
-
-# 4. XGBoost Modeli (Derinliği arttırıyoruz)
-# XGBClassifier'ı şu şekilde ayarla (daha "düşünen" bir model için)
-model = XGBClassifier(
-    n_estimators=300,
-    learning_rate=0.05,
-    max_depth=5,
-    subsample=0.8,       # 🌟 HER EĞİTİMDE VERİNİN %80'İNİ KULLAN
-    colsample_bytree=0.8,# 🌟 HER AĞAÇTA ÖZELLİKLERİN %80'İNİ KULLAN
-    random_state=42
-)
-model.fit(X_train, y_train)
-
-# 5. Başarıyı Ölç
-y_pred = model.predict(X_test)
-print(f"DOĞRULUK ORANI: %{accuracy_score(y_test, y_pred) * 100:.2f}")
-
-# 6. Kaydet
-joblib.dump(model, "gesture_mlp_model.pkl") # İsmi aynı tut ki main.py bozulmasın
-joblib.dump(imputer, "imputer.pkl")
-joblib.dump(le, "label_encoder.pkl") # 🌟 Yeni: Harfleri geri çevirmek için
-
-from sklearn.metrics import confusion_matrix
-import seaborn as sns
-import matplotlib.pyplot as plt
-
-cm = confusion_matrix(y_test, y_pred)
-plt.figure(figsize=(10,10))
-sns.heatmap(cm, annot=True, fmt='d')
-plt.savefig('confusion_matrix.png')
-print("Grafik 'confusion_matrix.png' olarak kaydedildi. Dosyayı klasöründen açıp incele.")
+print(f"🎯 Test Seti Doğruluk Skoru: {test_accuracy:.4f}")
+print("\nSınıflandırma Raporu:")
+print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
